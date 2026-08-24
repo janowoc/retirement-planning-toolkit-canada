@@ -63,7 +63,7 @@
   },
 
   "government_benefits": {
-    "_comment": "CPP and OAS are separate benefits with separate claim ages (set per member above). Enter the ESTIMATED monthly amount at the claim age you plan to use. CPP: claim 60-70 (standard 65). OAS: claim 65-70, and is subject to the OAS Recovery Tax (clawback) above the income threshold in assumptions. Quebec residents: enter QPP in the CPP field.",
+    "_comment": "CPP and OAS are separate benefits with separate claim ages (set per member above). Enter the ESTIMATED monthly amount at the claim age you plan to use. CPP: claim 60-70 (standard 65). OAS: claim 65-70, and is subject to the OAS Recovery Tax (clawback) above the income threshold in assumptions. Quebec residents: enter QPP in the CPP field. The engine does NOT apply the deferral increase itself (OAS +0.6%/month, CPP +0.7%/month past the standard age) -- these monthly amounts must already reflect the claim age you entered above; changing the claim age alone does not rescale them.",
     "spouse_a_cpp_monthly": 0,
     "spouse_a_oas_monthly": 0,
     "spouse_b_cpp_monthly": 0,

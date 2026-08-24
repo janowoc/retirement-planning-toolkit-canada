@@ -52,8 +52,16 @@ GOODF = Font(color="1A7F37", bold=True)
 # Jan-1 balance. Source: canada.ca "Chart - Prescribed factors" (see
 # docs/CANADA_RULES.md s7). This is regulation, not user config, so it is
 # encoded here rather than in config.json.
+#
+# No entry for age 71: the model only converts RRSP -> RRIF by the standard
+# Dec-31-of-the-year-you-turn-71 deadline (docs/CANADA_RULES.md s6), so there is
+# no minimum in the conversion year and the first mandatory withdrawal is for
+# the year you turn 72 (s7). CRA's own table does list a 71 factor (5.28%), but
+# it only applies to a RRIF opened by *early* conversion (before 71) reaching
+# age 71 -- a path this engine doesn't model (see rrif_min_factor below). Kept
+# out of this dict on purpose so it can't be misread as reachable here.
 RRIF_FACTORS = {
-    71: .0528, 72: .0540, 73: .0553, 74: .0567, 75: .0582, 76: .0598,
+    72: .0540, 73: .0553, 74: .0567, 75: .0582, 76: .0598,
     77: .0617, 78: .0636, 79: .0658, 80: .0682, 81: .0708, 82: .0738,
     83: .0771, 84: .0808, 85: .0851, 86: .0899, 87: .0955, 88: .1021,
     89: .1099, 90: .1192, 91: .1306, 92: .1449, 93: .1634, 94: .1879,
@@ -61,8 +69,16 @@ RRIF_FACTORS = {
 
 
 def rrif_min_factor(age):
-    """Prescribed RRIF minimum factor for an age. 0 before the first mandatory
-    withdrawal (year you turn 72, after converting by 71); 20% at 95+."""
+    """Prescribed RRIF minimum factor for an age (docs/CANADA_RULES.md s7).
+
+    0 before the first mandatory withdrawal (year you turn 72, after converting
+    by the standard year-you-turn-71 deadline); 20% at 95+.
+
+    Not modelled: an early conversion (before 71), for which s7 gives the
+    factor as 1/(90 - age). The model never converts early, so this path is
+    intentionally unsupported -- an early converter's true minimum would be
+    silently reported as 0 by this function.
+    """
     if age < 72:
         return 0.0
     if age >= 95:
@@ -361,7 +377,10 @@ def _simulate_meltdown(cfg, strategy, target=None):
         if strategy == "none":
             voluntary = 0.0
         elif strategy == "clawback":
-            ceiling = n_active * thr0 * idx
+            # Same statutory figure as thr_n below, so it must carry the same
+            # base-year indexation -- otherwise the strategy aims at a ceiling
+            # one inflation-year away from the line it is trying not to cross.
+            ceiling = n_active * thr0 * tax_ca.index_factor(year, infl)
             voluntary = max(0.0, min(ceiling - (retirement_fixed + b_work), rrsp - forced))
         else:  # optimal -- level per-spouse taxable target
             ceiling = n_active * target
@@ -378,7 +397,12 @@ def _simulate_meltdown(cfg, strategy, target=None):
         reg_withdraw = forced + voluntary
         both_retired = (a_age >= a_ret) and (b_age >= b_ret)
         family_total = retire_income + b_work
-        thr_n = thr0 * idx
+        # The OAS clawback threshold is a statutory figure vintaged to
+        # tax_ca.BASE_YEAR (2025), same as the bracket tables -- index it off
+        # that base year (tax_ca.index_factor), NOT off "years from today"
+        # (`idx`), or it silently drifts against the brackets it interacts with.
+        # See docs/CANADA_RULES.md §1.
+        thr_n = thr0 * tax_ca.index_factor(year, infl)
         if both_retired:
             half = retire_income / 2.0
             oas_each = (oas_a + oas_b) / 2.0

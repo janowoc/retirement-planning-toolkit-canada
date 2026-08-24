@@ -1,5 +1,8 @@
 """Unit tests for the Canadian tax engine. Expected values are anchored to the
 sourced 2025 figures in docs/CANADA_RULES.md (verified vs CRA / Revenu Quebec)."""
+import datetime
+import inspect
+
 import pytest
 import tax_ca
 
@@ -145,3 +148,94 @@ def test_high_income_matches_external_calculator():
 def test_unknown_province_falls_back_to_ontario():
     # "ZZ" is not a real jurisdiction -> engine warns and uses Ontario.
     assert tax_ca.income_tax(80000, "ZZ") == tax_ca.income_tax(80000, "ON")
+
+
+# ---- A1: index_factor / BASE_YEAR indexation consistency -------------------
+
+def test_base_year_is_2025():
+    # CORRECTNESS: BASE_YEAR is not a free parameter -- every statutory figure
+    # in this module (federal brackets/BPA per docs/CANADA_RULES.md §4a, the
+    # provincial tables per §5, and the OAS clawback threshold per §1) is
+    # sourced to the 2025 tax year. Written against the literal 2025, not the
+    # symbol, so a change to BASE_YEAR itself fails loudly here instead of
+    # silently re-anchoring every test that's written relative to the symbol.
+    assert tax_ca.BASE_YEAR == 2025
+
+
+def test_index_factor_base_year():
+    # CORRECTNESS: index_factor(BASE_YEAR, infl) is 1.0 by definition (no years
+    # have elapsed from the base year), and one year of indexation at 2% is
+    # exactly a 1.02x multiplier. Both are definitional, not sourced figures.
+    # Uses the literal 2025 (not the tax_ca.BASE_YEAR symbol) so a regression
+    # that changes BASE_YEAR without updating the vintage of the underlying
+    # figures fails this assertion instead of silently moving with it.
+    assert tax_ca.index_factor(2025, 0.021) == 1.0
+    assert tax_ca.index_factor(tax_ca.BASE_YEAR, 0.021) == 1.0
+    assert tax_ca.index_factor(tax_ca.BASE_YEAR + 1, 0.02) == pytest.approx(1.02)
+
+
+def test_index_factor_matches_bracket_indexation():
+    # CORRECTNESS (A1 fix): the OAS clawback threshold and the federal bracket
+    # ceilings must be indexed off the SAME base year by the SAME factor for a
+    # given simulation year -- otherwise the threshold silently drifts against
+    # the brackets it interacts with (docs/CANADA_RULES.md §1; the bug this
+    # fixes is described in .claude/plans/canada-tax-characterization.md A1).
+    # Derived from today's date, not hardcoded to 2026, so this doesn't rot.
+    year = datetime.date.today().year
+    infl = 0.021
+    # `_f` (used internally by federal_tax/_bracket_tax to project bracket
+    # ceilings) must delegate to the same public `index_factor` used to project
+    # the OAS threshold in build_model -- i.e. there is exactly one
+    # implementation, so they can never diverge again.
+    assert tax_ca._f(year, infl) == tax_ca.index_factor(year, infl)
+
+
+# ---- A2: OAS full-clawback ceiling identity ---------------------------------
+
+def test_oas_full_clawback_ceiling():
+    # CORRECTNESS: docs/CANADA_RULES.md §1 -- "full clawback ceiling, 65-74" is
+    # threshold + annual_OAS/0.15, computed dynamically (not hardcoded). With
+    # the 2025 threshold $93,454 and OAS $727.67/mo (=$8,732.04/yr):
+    # 93,454 + 8,732.04/0.15 = $151,667.6, matching the documented $151,668.
+    threshold = 93454
+    annual_oas = 727.67 * 12
+    ceiling = threshold + annual_oas / 0.15
+    assert ceiling == pytest.approx(151667.6, abs=0.1)
+    # At the ceiling, the FULL annual OAS is clawed back...
+    assert tax_ca.oas_clawback(ceiling, annual_oas, threshold) == pytest.approx(annual_oas, abs=1e-6)
+    # ...and strictly less just below it.
+    assert tax_ca.oas_clawback(ceiling - 100, annual_oas, threshold) < annual_oas
+
+
+# ---- A3: clawback is assessed on individual income, not household ----------
+
+def test_oas_clawback_is_individual_not_household():
+    # CORRECTNESS: docs/CANADA_RULES.md §1 -- "assessed on individual net
+    # income (line 23400), not household." Two spouses each at $60k (household
+    # total $120k) individually owe nothing; one spouse alone at $120k owes tax.
+    threshold = 93454
+    annual_oas = 727.67 * 12
+    assert tax_ca.oas_clawback(60000, annual_oas, threshold) == 0
+    assert tax_ca.oas_clawback(120000, annual_oas, threshold) > 0
+
+
+# ---- A4: clawback cash-flow timing (deviation, do not "fix") ---------------
+
+def test_oas_clawback_has_no_benefit_period_parameter():
+    # DEVIATION (keeping, not a bug): oas_clawback() assesses the SAME year's
+    # net income against that SAME year's OAS -- which is the correct
+    # lifetime-tax treatment. docs/CANADA_RULES.md §1's July-June period is the
+    # WITHHOLDING schedule (Service Canada collects installments against the
+    # following benefit year; the return then reconciles). The function has no
+    # year/benefit-period parameter, so a caller cannot express that ~1-year
+    # lag. The residual deviation is cash-flow only: the money actually leaves
+    # ~1 year later than modelled, so discounting it at year n slightly
+    # overstates its present value and spendable cash is reduced a year early.
+    # Misleads: anyone reading a modelled year-n clawback as when Service Canada
+    # actually withholds the money. Do NOT "fix" this -- same-year assessment
+    # is correct for lifetime-tax purposes; only a cash-flow-timing model would
+    # need the lag, and none exists.
+    params = list(inspect.signature(tax_ca.oas_clawback).parameters)
+    assert params == ["net_income", "oas_received", "threshold", "recovery_rate"]
+    assert "year" not in params
+    assert "benefit_period" not in params

@@ -213,9 +213,20 @@ PROVINCES = {
 _warned = set()
 
 
-def _f(year, infl):
-    """Inflation index factor from the base year."""
+def index_factor(year, infl=0.021):
+    """Inflation index factor from BASE_YEAR to `year`.
+
+    Public entry point so other modules (e.g. build_model's meltdown simulator)
+    can index a statutory figure -- like the OAS clawback threshold -- off the
+    same base year as the bracket tables, instead of off "years since today".
+    """
     return (1 + infl) ** (year - BASE_YEAR)
+
+
+def _f(year, infl):
+    """Inflation index factor from the base year. Delegates to `index_factor`
+    so there is exactly one implementation."""
+    return index_factor(year, infl)
 
 
 def _effective_bpa(full, floor, phase, income, year, infl):
