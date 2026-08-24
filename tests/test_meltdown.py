@@ -199,6 +199,169 @@ def test_demo_oas_ratio_matches_documented_deferral_convention():
     assert gb["spouse_b_oas_monthly"] / gb["spouse_a_oas_monthly"] == pytest.approx(1.36, abs=0.002)
 
 
+def test_pension_split_capped_below_65_when_only_pension_eligible():
+    # CORRECTNESS (B1): docs/CANADA_RULES.md §13 -- under 65 the "eligible for
+    # splitting" list is (in this model) just the DB pension annuity; RRIF /
+    # registered withdrawals do NOT qualify until 65. So even though T1032
+    # permits reallocating up to 50% of ELIGIBLE income, it does not permit
+    # equalizing TOTAL income once some of that income (here, the voluntary
+    # RRSP melt) is not eligible. Use "optimal" with a fixed target so a
+    # voluntary, pre-65-ineligible withdrawal exists alongside the pension --
+    # target=90000 is the same value already used by test_simulation_invariants.
+    cfg = _cfg("tremblay_config.json")
+    a_ret = cfg["household"]["members"][0]["retirement_age"]
+    b_ret = cfg["household"]["members"][1]["retirement_age"]
+    pension_m = cfg["income"]["pension_monthly_at_retirement"]
+    cola = cfg["income"]["pension_cola"]
+
+    r = bm._simulate_meltdown(cfg, "optimal", target=90000.0)
+    rows = [row for row in r["schedule"]
+            if a_ret <= row["a_age"] < 65 and b_ret <= row["b_age"] < 65]
+    assert rows, "test is vacuous: no simulated year has both spouses retired and under 65"
+
+    for row in rows:
+        # Spouse A's eligible income pre-65 is exactly the DB pension annuity
+        # for that year -- computed here from config (pension_monthly x 12 x
+        # cola compounding), independently of the simulator's own field.
+        expected_pension = pension_m * 12 * (1 + cola) ** (row["a_age"] - a_ret)
+        assert row["eligible_a"] == pytest.approx(expected_pension, abs=1.0)
+        assert row["taxed_a"] != pytest.approx(row["taxed_b"], abs=1.0), (
+            "gross incomes differ (pension + ineligible RRSP melt on A vs a "
+            "smaller registered-withdrawal share on B) but taxed incomes came "
+            "out equal -- income appears to have been split past the s13 cap"
+        )
+        # The transfer itself is capped at exactly 50% of that eligible pension.
+        assert row["split_transfer"] == pytest.approx(0.5 * expected_pension, abs=1.0)
+
+
+def test_registered_withdrawal_split_expands_at_65():
+    # CORRECTNESS (B1): docs/CANADA_RULES.md §13 -- "at 65+ the list broadens
+    # to include RRIF withdrawals... so RRIF income becomes splittable at 65."
+    # Eligibility is gated on that spouse's OWN age (not the household's, and
+    # not "the older spouse" -- in this demo spouse B is chronologically older
+    # but spouse A holds the pension and is the transferor throughout this
+    # stretch, so it is A's own 65th birthday that newly makes A's share of
+    # the registered withdrawal eligible). Compare the year before vs the year
+    # A turns 65, strategy and target held constant.
+    cfg = _cfg("tremblay_config.json")
+    r = bm._simulate_meltdown(cfg, "optimal", target=90000.0)
+    before = next(row for row in r["schedule"] if row["a_age"] == 64)
+    at65 = next(row for row in r["schedule"] if row["a_age"] == 65)
+    assert before["eligible_a"] < at65["eligible_a"]   # reg. withdrawal share newly counted
+    assert before["split_transfer"] < at65["split_transfer"]
+
+
+def test_split_transfer_never_exceeds_half_of_transferors_eligible_income():
+    # CORRECTNESS (B1): docs/CANADA_RULES.md §13's hard cap -- "up to 50% of
+    # eligible pension income." Check every simulated year across all three
+    # strategies: the transfer never exceeds 50% of the larger of the two
+    # spouses' eligible income (the transferor is always the higher-income
+    # spouse, so its eligible income is whichever of eligible_a/eligible_b is
+    # relevant that year -- taking the max is a safe upper bound either way).
+    cfg = _cfg("tremblay_config.json")
+    for strategy, kwargs in (("none", {}), ("clawback", {}), ("optimal", {"target": 90000.0})):
+        r = bm._simulate_meltdown(cfg, strategy, **kwargs)
+        for row in r["schedule"]:
+            cap = 0.5 * max(row["eligible_a"], row["eligible_b"])
+            assert row["split_transfer"] <= cap + 1.0, (
+                f"{strategy} {row['year']}: transfer {row['split_transfer']} exceeds "
+                f"50% of eligible income {cap}"
+            )
+
+
+@pytest.mark.parametrize("name", ["tremblay_config.json", "gagnon_config.json"])
+def test_only_pension_and_registered_income_is_ever_eligible(name):
+    # CORRECTNESS (B1): docs/CANADA_RULES.md §13 -- the eligible list is the RPP
+    # lifetime annuity (the DB pension) plus, once THAT spouse turns 65, their
+    # registered/RRIF withdrawals. CPP, OAS, passive and employment income are
+    # never splittable under T1032 (CPP *sharing* is a separate mechanism).
+    #
+    # The bound is rebuilt here from config + the schedule's own withdrawal
+    # figures rather than read back from eligible_a/eligible_b, so this fails if
+    # any non-eligible stream is ever folded into the eligible pool. Both demos
+    # are exercised: the Ontario fixture has passive_income_annual == 0, which
+    # makes an inflated eligible pool invisible there, so Quebec carries the
+    # real coverage.
+    cfg = _cfg(name)
+    inc = cfg["income"]
+    acct = cfg["accounts"]
+    a_ret = cfg["household"]["members"][0]["retirement_age"]
+    pension_m, cola = inc["pension_monthly_at_retirement"], inc["pension_cola"]
+    a_rrsp = float(acct.get("spouse_a_rrsp", 0))
+    b_rrsp = float(acct.get("spouse_b_rrsp", 0))
+    total_rrsp = a_rrsp + b_rrsp
+    a_share = (a_rrsp / total_rrsp) if total_rrsp > 0 else 0.5
+
+    for strategy, kwargs in (("none", {}), ("clawback", {}), ("optimal", {"target": 90000.0})):
+        r = bm._simulate_meltdown(cfg, strategy, **kwargs)
+        for row in r["schedule"]:
+            reg = row["forced"] + row["voluntary"]
+            pension = pension_m * 12 * ((1 + cola) ** max(0, row["a_age"] - a_ret))
+            # Spouse A: DB pension at any age, plus A's share of the registered
+            # draw only from A's own 65th birthday.
+            cap_a = pension + (reg * a_share if row["a_age"] >= 65 else 0.0)
+            # Spouse B holds no DB pension in either fixture, so B's eligible
+            # income is their registered share alone, gated on B's own age.
+            cap_b = reg * (1.0 - a_share) if row["b_age"] >= 65 else 0.0
+            assert row["eligible_a"] <= cap_a + 1.0, (
+                f"{name} {strategy} {row['year']}: eligible_a {row['eligible_a']} "
+                f"exceeds pension + A's registered share {cap_a} -- a non-eligible "
+                f"stream (CPP/OAS/passive) has leaked into the splittable pool"
+            )
+            assert row["eligible_b"] <= cap_b + 1.0, (
+                f"{name} {strategy} {row['year']}: eligible_b {row['eligible_b']} "
+                f"exceeds B's registered share {cap_b}"
+            )
+
+
+def test_pension_income_splitting_flag_is_live():
+    # CORRECTNESS (B1): household.pension_income_splitting was declared in
+    # every config and documented in ARCHITECTURE.md but read nowhere in
+    # engine/ -- setting it false changed nothing (dead flag). After the fix,
+    # disabling the T1032 election must strictly raise lifetime tax for a
+    # household with an income gap between spouses -- reallocating income into
+    # a lower bracket is never worse under a progressive schedule (§13).
+    cfg_on = _cfg("tremblay_config.json")
+    cfg_off = copy.deepcopy(cfg_on)
+    cfg_off["household"]["pension_income_splitting"] = False
+
+    on = bm._simulate_meltdown(cfg_on, "clawback")
+    off = bm._simulate_meltdown(cfg_off, "clawback")
+    assert off["total_tax"] > on["total_tax"]
+
+
+def test_pension_income_splitting_defaults_true_when_key_absent():
+    # CORRECTNESS (B1): "default to True when the key is absent so existing
+    # configs behave as before." Remove the key entirely (as opposed to
+    # setting it False) and confirm behaviour matches it being explicitly True.
+    cfg_explicit = _cfg("tremblay_config.json")
+    cfg_absent = copy.deepcopy(cfg_explicit)
+    del cfg_absent["household"]["pension_income_splitting"]
+
+    a = bm._simulate_meltdown(cfg_explicit, "clawback")
+    b = bm._simulate_meltdown(cfg_absent, "clawback")
+    assert a["total_tax"] == pytest.approx(b["total_tax"])
+
+
+def test_oas_steps_up_ten_percent_at_75():
+    # CORRECTNESS (B2): docs/CANADA_RULES.md §1 -- max monthly OAS is
+    # $727.67/mo at 65-74 and $800.44/mo at 75+, a permanent increase
+    # effective July 2022. Derive the ratio from those two sourced figures
+    # (not hardcoded blind) and confirm the simulated OAS schedule steps up by
+    # that ratio, ON TOP OF the ordinary inflation indexation, across the
+    # 74->75 boundary.
+    documented_ratio = 800.44 / 727.67
+    assert documented_ratio == pytest.approx(1.10, abs=0.001)
+
+    cfg = _cfg("tremblay_config.json")
+    r = bm._simulate_meltdown(cfg, "none")   # isolate: no voluntary withdrawals to confound
+    infl = cfg["assumptions"]["inflation_rate"]
+    row74 = next(row for row in r["schedule"] if row["a_age"] == 74)
+    row75 = next(row for row in r["schedule"] if row["a_age"] == 75)
+    expected = row74["oas_a"] * (1 + infl) * documented_ratio   # one more inflation year, plus the uplift
+    assert row75["oas_a"] == pytest.approx(expected, rel=0.01)
+
+
 def test_monte_carlo_deterministic_and_in_range():
     cfg = _cfg("tremblay_config.json")
     m1 = qu.monte_carlo(cfg, n_sims=500)

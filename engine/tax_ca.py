@@ -48,6 +48,13 @@ FEDERAL_AGE_PHASEOUT = 45522
 FEDERAL_AGE_PHASEOUT_RATE = 0.15
 FEDERAL_PENSION_MAX = 2000
 
+# OAS age-75 permanent increase (docs/CANADA_RULES.md s1), effective July 2022:
+# the max monthly OAS payment steps from $727.67 (age 65-74) to $800.44 (age 75+),
+# i.e. 800.44 / 727.67 = 1.09996... ~= +10%. Regulation, not a user assumption, so
+# it lives here rather than in config.json; applied on top of whatever
+# (already deferral-adjusted, see A5) monthly amount the household configured.
+OAS_AGE75_UPLIFT = 1.10
+
 # Quebec individual Health Services Fund contribution (Schedule F, 2025).
 # Piecewise on income subject to HSF (pension/RRIF/investment; OAS + employment
 # excluded). Bands index with inflation; the $1,000 cap is held flat.

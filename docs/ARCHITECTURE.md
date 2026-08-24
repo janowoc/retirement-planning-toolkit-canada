@@ -69,11 +69,13 @@ Quebec includes its own brackets, higher BPA, no surtax,
 and the **16.5% federal abatement** (applied in `income_tax()`); QPP is taxed like
 CPP, so enter it in the `cpp_monthly` fields. The engine also models the **age amount**
 and **pension-income** credits (federal + ON + QC, symmetric) and Quebec's **HSF
-contribution** (see `docs/CANADA_RULES.md` §5c). The optimizer assumes retirement
-income is
-equalized between spouses at 65+ (pension splitting / spousal RRSPs), discounts tax
-at the inflation rate, and treats non-registered + TFSA + cash as an after-tax
-buffer. The federal and Manitoba high-income BPA phase-downs **are** modelled
+contribution** (see `docs/CANADA_RULES.md` §5c). The optimizer performs a **T1032
+pension-income split**: up to 50% of each spouse's *eligible* pension income (the
+DB pension annuity at any age; RRIF/registered withdrawals only once that spouse
+turns 65 — `docs/CANADA_RULES.md` §13) moves from the higher-income spouse to the
+lower, capped at closing the gap — not a full equalization of total income. It
+discounts tax at the inflation rate, and treats non-registered + TFSA + cash as an
+after-tax buffer. The federal and Manitoba high-income BPA phase-downs **are** modelled
 (verified against external calculators). It does **not** yet model non-registered
 **capital-gains** tax, the **dividend tax credit**, or TFSA contribution limits.
 Illustrative, not advice — see `docs/CANADA_RULES.md`.

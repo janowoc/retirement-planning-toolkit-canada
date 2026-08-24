@@ -77,10 +77,14 @@ l'**abattement fédéral de 16,5 %** (appliqué dans `income_tax()`); le RRQ est
 comme le RPC, alors inscrivez-le dans les champs `cpp_monthly`. Le moteur modélise
 aussi les crédits pour **montant en raison de l'âge** et pour **revenu de pension**
 (fédéral + ON + QC, symétriques) ainsi que la **cotisation au FSS** du Québec (voir
-`docs/CANADA_RULES.md` §5c). L'optimiseur suppose que le revenu de retraite est
-égalisé entre les conjoints à 65 ans et plus (fractionnement de pension / REER de
-conjoint), actualise l'impôt au taux d'inflation, et traite le non enregistré + le
-CELI + l'encaisse comme un coussin après impôt. Les réductions progressives du
+`docs/CANADA_RULES.md` §5c). L'optimiseur effectue un **fractionnement du revenu de
+pension (formulaire T1032)** : jusqu'à 50 % du revenu de pension *admissible* de
+chaque conjoint (la rente du régime de retraite à PD à tout âge; les retraits du
+FERR/enregistrés seulement une fois que ce conjoint atteint 65 ans —
+`docs/CANADA_RULES.md` §13) passe du conjoint au revenu le plus élevé vers celui au
+revenu le plus faible, plafonné de façon à combler l'écart — non une égalisation
+complète du revenu total. Il actualise l'impôt au taux d'inflation, et traite le non
+enregistré + le CELI + l'encaisse comme un coussin après impôt. Les réductions progressives du
 montant personnel de base pour revenus élevés (fédéral et Manitoba) **sont**
 modélisées (vérifiées par rapport à des calculatrices externes). Il ne modélise pas
 encore l'impôt sur les **gains en capital** des comptes non enregistrés, le **crédit

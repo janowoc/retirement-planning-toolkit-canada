@@ -349,6 +349,21 @@ def _simulate_meltdown(cfg, strategy, target=None):
     cpp_a0, oas_a0 = gb["spouse_a_cpp_monthly"] * 12, gb["spouse_a_oas_monthly"] * 12
     cpp_b0, oas_b0 = gb["spouse_b_cpp_monthly"] * 12, gb["spouse_b_oas_monthly"] * 12
 
+    # Pension income splitting (T1032, docs/CANADA_RULES.md s13). The simulator
+    # tracks one combined RRSP/RRIF pot, not two, so there is no per-spouse
+    # balance to attribute a withdrawal to. Simplification: split each year's
+    # registered withdrawal by the INITIAL balance ratio, held constant for the
+    # whole projection -- this ignores that the two spouses' balances would
+    # actually diverge over time (different draw rates, growth applied to a
+    # single pot). household.pension_income_splitting defaults to True when
+    # absent so existing configs behave as before; set it false to disable the
+    # T1032 election entirely.
+    _init_a_rrsp = float(acct.get("spouse_a_rrsp", 0))
+    _init_b_rrsp = float(acct.get("spouse_b_rrsp", 0))
+    _init_rrsp_total = _init_a_rrsp + _init_b_rrsp
+    a_rrsp_share = (_init_a_rrsp / _init_rrsp_total) if _init_rrsp_total > 0 else 0.5
+    split_enabled = bool(cfg["household"].get("pension_income_splitting", True))
+
     horizon = max(1, 90 - a_age0)            # project to spouse A age 90
     lifetime_tax, insolvent, schedule = 0.0, False, []
     last_survivor_base = 0.0
@@ -366,9 +381,16 @@ def _simulate_meltdown(cfg, strategy, target=None):
         passive = passive0 * idx
         b_work = b_salary0 * idx if b_age < b_ret else 0.0
         cpp_a = cpp_a0 * idx if a_age >= a_cpp else 0.0
-        oas_a = oas_a0 * idx if a_age >= a_oas else 0.0
         cpp_b = cpp_b0 * idx if b_age >= b_cpp else 0.0
-        oas_b = oas_b0 * idx if b_age >= b_oas else 0.0
+        # OAS: inflation-indexed from the configured (already deferral-adjusted,
+        # see A5) 65-74 rate, PLUS the permanent age-75 uplift (docs/CANADA_RULES.md
+        # s1 -- $727.67/mo at 65-74 vs $800.44/mo at 75+), applied from the year
+        # that spouse turns 75. Without it OAS is understated for the 75-90
+        # stretch, i.e. most of the projection.
+        oas_a = (oas_a0 * idx * (tax_ca.OAS_AGE75_UPLIFT if a_age >= 75 else 1.0)
+                 if a_age >= a_oas else 0.0)
+        oas_b = (oas_b0 * idx * (tax_ca.OAS_AGE75_UPLIFT if b_age >= 75 else 1.0)
+                 if b_age >= b_oas else 0.0)
 
         forced = min(rrsp * rrif_min_factor(a_age), rrsp)
         retirement_fixed = pension + passive + cpp_a + oas_a + cpp_b + oas_b + forced
@@ -389,41 +411,70 @@ def _simulate_meltdown(cfg, strategy, target=None):
         withdraw = forced + voluntary
         rrsp -= withdraw
 
-        # ---- tax: per-spouse, equalizing retirement income once both are retired.
+        # ---- tax: per-spouse, with a T1032 pension-income-split transfer.
         # Threads age (age amount), eligible pension income (pension credit),
         # net family income (Quebec's family-tested credit), and the HSF base
         # (income excl. OAS/employment) into the tax engine. ----
-        retire_income = retirement_fixed + voluntary
+        retire_income = retirement_fixed + voluntary   # household total, excl. b_work (the "taxable" column)
         reg_withdraw = forced + voluntary
-        both_retired = (a_age >= a_ret) and (b_age >= b_ret)
-        family_total = retire_income + b_work
+
+        # Attribute each spouse's OWN gross income before any split (B1,
+        # docs/CANADA_RULES.md s13). CPP, OAS, and B's employment income are
+        # never splittable under T1032; B has no DB pension in this model, so
+        # B's income is CPP + OAS + salary + B's share of the registered draw.
+        # (CPP *sharing* -- a distinct, opt-in Service-Canada mechanism that
+        # actually reassigns CPP credits between spouses -- is out of scope.)
+        reg_withdraw_a = reg_withdraw * a_rrsp_share
+        reg_withdraw_b = reg_withdraw * (1.0 - a_rrsp_share)
+        inc_a = pension + passive + cpp_a + oas_a + reg_withdraw_a
+        inc_b = cpp_b + oas_b + b_work + reg_withdraw_b
+
+        # Eligible-for-splitting income per spouse (s13): the DB pension
+        # annuity is eligible at any age; registered (RRIF) withdrawals only
+        # become eligible once THAT spouse (not the household, not "the older
+        # spouse") turns 65. Nothing else qualifies.
+        eligible_a = pension + (reg_withdraw_a if a_age >= 65 else 0.0)
+        eligible_b = reg_withdraw_b if b_age >= 65 else 0.0
+
+        # Closed-form transfer: up to 50% of the higher-income spouse's
+        # eligible income, capped so it never overshoots equalization -- s13's
+        # 50% ceiling combined with a progressive schedule means the optimum
+        # transfer is always "equalize, subject to the eligibility cap", so no
+        # grid search is needed. Skipped entirely if the household turned the
+        # T1032 election off.
+        if split_enabled and inc_a != inc_b:
+            eligible_transferor = eligible_a if inc_a > inc_b else eligible_b
+            transfer = max(0.0, min(0.5 * eligible_transferor, abs(inc_a - inc_b) / 2.0))
+        else:
+            transfer = 0.0
+
+        if inc_a >= inc_b:
+            taxed_a, taxed_b = inc_a - transfer, inc_b + transfer
+            pension_income_a, pension_income_b = eligible_a - transfer, eligible_b + transfer
+        else:
+            taxed_a, taxed_b = inc_a + transfer, inc_b - transfer
+            pension_income_a, pension_income_b = eligible_a + transfer, eligible_b - transfer
+
+        family_total = inc_a + inc_b   # reallocation only -- family total is unaffected by the split
+        hsf_base_a = max(0.0, taxed_a - oas_a)
+        hsf_base_b = max(0.0, taxed_b - oas_b - b_work)   # B's employment income is excluded from HSF too
+
         # The OAS clawback threshold is a statutory figure vintaged to
         # tax_ca.BASE_YEAR (2025), same as the bracket tables -- index it off
         # that base year (tax_ca.index_factor), NOT off "years from today"
         # (`idx`), or it silently drifts against the brackets it interacts with.
         # See docs/CANADA_RULES.md §1.
         thr_n = thr0 * tax_ca.index_factor(year, infl)
-        if both_retired:
-            half = retire_income / 2.0
-            oas_each = (oas_a + oas_b) / 2.0
-            # eligible pension income: DB pension always; registered (RRIF)
-            # withdrawals qualify only at 65+ (gate on the older spouse, A).
-            elig_each = (pension + (reg_withdraw if a_age >= 65 else 0.0)) / 2.0
-            hsf_each = max(0.0, half - oas_each)
-            tax = (tax_ca.income_tax(half, prov, year, infl, age=a_age, pension_income=elig_each,
-                                     family_net_income=retire_income, hsf_base=hsf_each)
-                   + tax_ca.income_tax(half, prov, year, infl, age=b_age, pension_income=elig_each,
-                                       family_net_income=retire_income, hsf_base=hsf_each))
-            claw = 2 * tax_ca.oas_clawback(half, oas_each, thr_n)
-        else:
-            inc_a, inc_b = retire_income, b_work
-            elig_a = pension + (reg_withdraw if a_age >= 65 else 0.0)
-            tax = (tax_ca.income_tax(inc_a, prov, year, infl, age=a_age, pension_income=elig_a,
-                                     family_net_income=family_total, hsf_base=max(0.0, inc_a - oas_a))
-                   + tax_ca.income_tax(inc_b, prov, year, infl, age=b_age, pension_income=0.0,
-                                       family_net_income=family_total, hsf_base=0.0))  # B = employment, no HSF
-            claw = (tax_ca.oas_clawback(inc_a, oas_a, thr_n)
-                    + tax_ca.oas_clawback(inc_b, oas_b, thr_n))
+        tax = (tax_ca.income_tax(taxed_a, prov, year, infl, age=a_age,
+                                 pension_income=max(0.0, pension_income_a),
+                                 family_net_income=family_total, hsf_base=hsf_base_a)
+               + tax_ca.income_tax(taxed_b, prov, year, infl, age=b_age,
+                                   pension_income=max(0.0, pension_income_b),
+                                   family_net_income=family_total, hsf_base=hsf_base_b))
+        # OAS itself is never split -- clawback is assessed against each
+        # spouse's OWN OAS at their OWN post-transfer income (docs/CANADA_RULES.md s1).
+        claw = (tax_ca.oas_clawback(taxed_a, oas_a, thr_n)
+                + tax_ca.oas_clawback(taxed_b, oas_b, thr_n))
         last_survivor_base = pension + cpp_a + oas_a
         year_tax = tax + claw
         lifetime_tax += year_tax / ((1 + infl) ** n)   # present value, today's $
@@ -446,6 +497,12 @@ def _simulate_meltdown(cfg, strategy, target=None):
             "taxable": retire_income, "forced": forced, "voluntary": voluntary,
             "tax": tax, "claw": claw, "rrsp": rrsp, "estate": rrsp + buffer + tfsa,
             "over": claw > 0,
+            # per-spouse post-transfer taxable income + the T1032 split amount
+            # (B1) -- exposed mainly so tests can pin the split without
+            # re-deriving it from the taxed totals.
+            "taxed_a": taxed_a, "taxed_b": taxed_b, "split_transfer": transfer,
+            "eligible_a": eligible_a, "eligible_b": eligible_b,
+            "oas_a": oas_a, "oas_b": oas_b,
         })
 
     # ---- terminal tax: RRSP left standing is deemed disposed at death (single filer) ----
