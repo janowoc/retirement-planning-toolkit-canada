@@ -44,6 +44,11 @@ pylibs/
 .venv/
 venv/
 
+# Claude Code -- agent/skill definitions ARE tracked; working artifacts are not.
+# Test plans and agent scratch are handoff material between models, not deliverables.
+.claude/plans/
+.claude/scratch/
+
 # OS
 .DS_Store
 .~lock.*#
