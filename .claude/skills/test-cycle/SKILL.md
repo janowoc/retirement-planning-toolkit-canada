@@ -65,8 +65,13 @@ When approved:
 
 - Stage **explicit paths**, never `git add -A` or `git commit -a`. Stray files
   the agents produced must be removed, not swept in.
-- Topic branches for upstream PRs are cut from `upstream/main`; fork-local
-  tooling belongs on `main`. Do not mix the two in one commit.
+- Topic branches are cut from `main`, so this tooling and `CLAUDE.md` are
+  available while the work happens. The fork-local tooling commits are stripped
+  before the upstream PR with
+  `git rebase --onto upstream/main main <branch>`, which replays only the
+  branch's own commits onto `upstream/main`. Never amend a topic change into a
+  tooling commit or vice versa — that strip depends on the two staying in
+  separate commits.
 - If the change touches `docs/`, confirm the `.fr.md` counterpart is in the same
   commit — `tests/test_docs_parity.py` fails otherwise, and `docs/**` triggers
   the Pages deploy workflow.
