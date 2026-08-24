@@ -46,11 +46,25 @@ implementation to many decimal places, are the tell. Report them individually.
 **4. Optional mutation spot-check.**
 
 The strongest evidence a test works is that it fails when the behaviour changes.
-Only if `git status --short` shows the target file **clean**: perturb one
-constant in `engine/tax_ca.py`, run the specific test, confirm it fails, then
-restore with `git checkout -- engine/tax_ca.py` and confirm `git status --short`
-is clean again. Never do this on a file with uncommitted changes — the restore
-would destroy them. Always report whether you ran this and what it showed.
+A test that cannot fail is not protecting anything, and this step is how you
+find out — it has already caught a green suite in which the headline fix was
+entirely unpinned.
+
+**Always mutate a copy, never the repo.** Copy the tree to the session
+scratchpad (`tar -cf - --exclude=.git --exclude=.venv --exclude=__pycache__ .`
+piped into the copy), perturb one constant there, run the suite there, then
+delete the copy. Confirm `git status --short` in the real repo is byte-identical
+before and after.
+
+Do **not** perturb in place and restore with `git checkout --`. You are almost
+always reviewing an uncommitted working tree, and that restores the file to the
+last *commit*, not to the working state — it silently destroys the very change
+you were sent to verify. The file being individually clean is not a sufficient
+guard, because a directory-level checkout takes its dirty neighbours with it.
+
+Report every mutation you ran and whether it was killed or survived. A survivor
+is a finding: name the behaviour nothing protects, and say whether it is genuine
+missing coverage or a branch that is dead under the current fixtures.
 
 **5. Stray files.**
 
